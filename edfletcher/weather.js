@@ -19,9 +19,9 @@
 // The data is sourced via the National Weather Service APIs, so this is US-only.
 //
 
-/* globals config, DRCUserScript, scopedRedisClient */
+/* globals config, DRCUserScript, scopedRedisClient, sendToBotChan, MessageEmbed */
 
-const { eventName, data, state } = DRCUserScript;
+const { eventName, data, state, isScheduled, constants } = DRCUserScript;
 const msgMatcher = /^\s*The\s+(?:weather|forecast)\s+(?:for|in)\s+(.*?)(?:\s+is)?\s?\.{2,}/g;
 
 async function lookupLatLng (search) {
@@ -91,14 +91,50 @@ function canProcessCurrentEvent () {
   return matchedMessage;
 }
 
+const AWHost = 'https://dataservice.accuweather.com';
+const WeatherTextEmojis = {
+  Sunny: '☀️',
+  'Mostly Sunny': '☀️',
+  'Partly Sunny': '⛅',
+  'Intermittent Clouds': '⛅',
+  'Hazy Sunshine': '🌫️',
+  'Mostly Cloudy': '🌥️',
+  Cloudy: '☁️',
+  'Dreary (Overcast)': '☁️',
+  Fog: '☁️',
+  Clear: '☀️',
+  'Mostly Clear': '☀️',
+};
+
+function awUnitToString(unitObj,  unitSep = ' ', type = 'Imperial', includeUnit = true) {
+  let retStr = `${unitObj[type]?.Value}`;
+
+  if (includeUnit) {
+    retStr += `${unitSep}${unitObj[type]?.Unit}`;
+  }
+
+  return retStr;
+}
+
 async function main () {
-  const matchedMessage = canProcessCurrentEvent();
-  if (!matchedMessage) {
-    return;
+  let matchedMessage;
+  if (!isScheduled) {
+    matchedMessage = canProcessCurrentEvent();
+    if (!matchedMessage) {
+      return;
+    }
   }
 
   let curState = await state.get();
-  const [[, lookup]] = matchedMessage;
+  let lookup;
+  if (isScheduled) {
+    lookup = data?.scriptArgs?.[0].replaceAll('"', '').replaceAll("'", '')
+      ?? constants.SCHEDULED_WEATHER_CITY;
+  }
+  else {
+    [[, lookup]] = matchedMessage;
+  }
+
   const luCache = curState?.luCache ?? {};
 
   if (!luCache[lookup]) {
@@ -131,6 +167,74 @@ async function main () {
 
   if (!staCache || !forecast) {
     forecast = `Unable to find results for "${lookup}"!`;
+  }
+
+  if (isScheduled) {
+    const awCache = curState?.awCache ?? {};
+    let cityId = awCache[lookup];
+    if (!cityId) {
+      const awLuRes = await fetch(`${AWHost}/locations/v1/cities/search?apikey=${constants.AW_API_KEY}&q=${encodeURI(lookup)}`);
+      if (awLuRes.ok) {
+        const resJson = await awLuRes.json();
+        if (resJson.length && resJson[0]?.Key) {
+          awCache[lookup] = cityId = resJson[0].Key;
+          await state.set({ ...curState, awCache });
+        }
+        else {
+          console.error(`Bad AW lookup json for ${lookup}`, resJson);
+        }
+      }
+      else {
+        sendToBotChan(`Cannot find "${lookup}" at ${AWHost}!`);
+      }
+    }
+  
+    const awRes = await fetch(`${AWHost}/currentconditions/v1/${cityId}?details=true&apikey=${constants.AW_API_KEY}`);
+    let desc = forecast;
+    const embed = new MessageEmbed()
+          .setTitle(`🌈 Weather for **${lookup}**`)
+          .setColor('BLUE');
+
+    if (awRes.ok) {
+      const [{
+        WeatherText,
+        IsDayTime,
+        RealFeelTemperature,
+        TemperatureSummary,
+        Wind,
+        WindGust,
+        Pressure,
+        PressureTendency,
+        PrecipitationSummary,
+        Link,
+      }] = await awRes.json();
+
+      if (!IsDayTime) {
+        embed.setColor('BLACK');
+      }
+
+      desc += '\n### Current conditions:\n' + 
+        `${WeatherTextEmojis[WeatherText] ?? ''} ${WeatherText}`;
+
+      embed.addField('🌡️ Temperature', `${awUnitToString(RealFeelTemperature, '')},  range of ` +
+        `${awUnitToString(TemperatureSummary.Past24HourRange.Minimum)} to ` + 
+        awUnitToString(TemperatureSummary.Past24HourRange.Maximum));
+
+      embed.addField('🌬️ Winds', `${awUnitToString(Wind.Speed)} with gusts to ${awUnitToString(WindGust.Speed)}`);
+
+      embed.addField('💥 Pressure', `${awUnitToString(Pressure)} and ` +
+        `${PressureTendency.LocalizedText.slice(0, 1).toLowerCase()}${PressureTendency.LocalizedText.slice(1)}`);
+
+      embed.addField('☔ Precipitation', `${awUnitToString(PrecipitationSummary.Precipitation)}; ` +
+        `${awUnitToString(PrecipitationSummary.Past24Hours)} in the last 24h.`);
+
+      embed.setURL(Link);
+    }
+
+    embed.setDescription(desc);
+
+    await sendToBotChan({ embeds: [embed] }, true);
+    return;
   }
 
   return scopedRedisClient((client, prefix) => client.publish(prefix, JSON.stringify({

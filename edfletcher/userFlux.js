@@ -3,7 +3,7 @@
 
 /* globals DRCUserScript, sendToBotChan, util */
 
-const { eventName, constants } = DRCUserScript;
+const { eventName, constants, data } = DRCUserScript;
 const events = ['irc:quit', 'irc:join', 'irc:part', 'irc:kick', 'irc:ban'];
 
 if (events.includes(eventName)) {
@@ -39,6 +39,10 @@ if (events.includes(eventName)) {
 
     if (!state?.lastAnnounce) {
         state.lastAnnounce = new Date();
+    }
+
+    if (data?.message === "K-Lined") {
+        sendToBotChan(`\`${data.nick} <${data.ident}@${data.hostname}>\` k-lined at ${data.tags?.time}`);
     }
     
     state.lastTotal = totals;

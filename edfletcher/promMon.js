@@ -2,22 +2,14 @@
 // and post to the bot/script channel any alerts that are currently firing.
 //
 // Requires the followings constants be set:
-//  * PROM_MON_CHECK_FREQ_MINS: scrape frequency, in minutes
 //  * PROM_MON_FQDN: the fully qualified name (including protocol) of your Prometheus server, e.g. http://localhost:9090
 
 /* globals DRCUserScript, util, sendToBotChan */
-const { constants, state } = DRCUserScript;
+const { constants, endScriptIfNotScheduled } = DRCUserScript;
+
+endScriptIfNotScheduled();
 
 async function main() {
-    const lastUpdate = Number(new Date());
-    const curState = await state.get() ?? { lastUpdate: 0 };
-
-    if (lastUpdate - curState.lastUpdate < constants.PROM_MON_CHECK_FREQ_MINS * 60 * 1000) {
-        return;
-    }
-
-    await state.set({ lastUpdate });
-
     const monRes = await fetch(`${constants.PROM_MON_FQDN}/api/v1/rules`);
     if (!monRes.ok) {
         sendToBotChan(`Request failed!`);
